@@ -32,34 +32,60 @@ person checking on their phone, not a hammering bot. UK daylight-saving is
 handled automatically (both UTC offsets are scheduled; a guard step keeps
 the right one).
 
+## Where to run it (this matters most)
+
+DVSA is behind **Imperva/Incapsula**. Once the script drives real Chrome, the
+biggest remaining signal a bot-detector has is your **IP address**:
+
+- **GitHub Actions runs from Azure datacenter IPs**, which Imperva treats as
+  near-zero-trust. A perfect real-Chrome browser arriving from a server range
+  is itself a contradiction, so datacenter runs are the most likely to be
+  challenged (independent estimates put datacenter pass rates around 10–35%).
+- **A residential IP** (your home broadband) is treated as "likely human"
+  (~85–95%). Your home IP making three requests a day is indistinguishable
+  from you checking the site yourself.
+
+So the single highest-impact choice is **where it runs**:
+
+| Option | IP | Effort | Notes |
+| --- | --- | --- | --- |
+| GitHub Actions (default here) | datacenter | zero | Works, but most likely to be challenged. Fine to start with. |
+| **Self-hosted GitHub runner at home** | residential | ~1 hr | Keep this exact workflow; jobs execute on your home IP. Best if you like the Actions setup. |
+| Home machine / mini-PC on a cron | residential | ~1–2 hr | Run `npm run check` from a small always-on **x86** box (an old laptop, or a ~£120 Intel N100). |
+| Raspberry Pi | residential | ~1–2 hr | Works, but ARM has **no official Google Chrome** — it falls back to Chromium, losing part of the browser-layer disguise. Prefer an x86 box. |
+
+Avoid paid residential proxies for a personal checker — your own home IP is
+cleaner and free. Start on GitHub Actions; if it gets challenged often, move to
+a home/self-hosted run. The code is identical either way.
+
 ## Looking like a real browser
 
-The checker avoids the obvious bot tells without any fingerprint-spoofing
-tricks:
+The checker removes the obvious automation tells and behaves like a person,
+without fragile fingerprint spoofing. The full reasoning and sources are in
+[`docs/anti-bot-notes.md`](docs/anti-bot-notes.md); in short:
 
-- **Real Google Chrome**, not Playwright's bundled Chromium — the bundled
-  build has a TLS fingerprint that matches no real Chrome release, which
-  anti-bot systems can spot before a single page renders.
-- **Headed, in a virtual display (xvfb)** on the runner — classic headless
-  mode leaks signals like a software GPU renderer.
-- **Automation fingerprints stripped** — the `AutomationControlled` flag and
-  `--enable-automation` switch are removed, and `navigator.webdriver` is
-  masked, so the browser doesn't announce itself as driven.
-- **Persistent Chrome profile**, cached between runs — cookies survive, so
-  the site sees a returning visitor rather than a fresh browser every time.
-- **Human input** — the pointer moves to a field in small steps before
-  clicking (no teleport-clicks), text is typed character by character in a
-  few chunks with varied 70–165 ms keystrokes and the odd "glance back at
-  the card" pause, and each page gets a little scroll-and-read dwell.
-- **Human pacing** — a random 1–4 second wait between every step, exactly
-  one pass per run, then it leaves. No retries, no rapid re-hits.
-- Realistic UK locale, timezone, viewport, and `Accept-Language`.
+- **Real Google Chrome** (not bundled Chromium), **headed under xvfb**, with a
+  **persistent profile** cached between runs — genuine TLS/HTTP2 fingerprints
+  and a returning-visitor session, which is most of the battle.
+- **One honest identity, no self-contradictions** — `navigator.webdriver` is
+  cleared by the launch flag (not a detectable JS getter); plugins, canvas and
+  the `chrome` object are left as real Chrome reports them (faking them
+  backfires); locale/timezone are UK. The WebGL GPU string is left honest by
+  default (a Windows GPU string on a Linux browser is a worse tell than the
+  truth).
+- **Human input** — the pointer follows a curved, minimum-jerk path (with
+  drift, tremor and overshoot, not a straight teleport), clicks are a real
+  press-and-hold slightly off-centre, and text is typed key-by-key with
+  log-normal timing and the odd hesitation. Licence/theory fields are read back
+  and retyped if a keystroke didn't land.
+- **Human pacing** — scroll-and-read dwells, random waits between steps, a
+  fresh per-run "persona" so timing differs each run, exactly one pass per run,
+  and no retry storms.
 
-This is deliberately restrained — three unhurried visits a day from a
-returning, human-looking browser. It does **not** try to defeat the anti-bot
-system, because aggressive evasion is exactly what gets flagged. Runs can
-still occasionally hit the Imperva challenge or the DVSA queue; the script
-waits out the queue, logs a challenge, and simply tries again next window.
+It deliberately does **not** try to defeat the anti-bot system — aggressive
+evasion is what gets flagged. Runs can still occasionally hit the Imperva
+challenge or the DVSA queue; the script waits out the queue, logs a challenge,
+and tries again next window.
 
 ## Phone notifications
 
