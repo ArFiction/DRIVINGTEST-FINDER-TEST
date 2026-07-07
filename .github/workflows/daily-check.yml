@@ -1,11 +1,19 @@
-name: Daily DVSA availability check
+name: DVSA availability check
 
 on:
   schedule:
-    # GitHub cron is UTC only, so both possible UK offsets are scheduled and
-    # the guard step below keeps whichever one is 05:35 Europe/London time.
-    - cron: '35 4 * * *' # 05:35 UK during BST (summer)
-    - cron: '35 5 * * *' # 05:35 UK during GMT (winter)
+    # Three checks a day, each landing at a random time inside its window:
+    #   ~6am UK      (05:35 + 0-45 min jitter)
+    #   ~lunch peak  (11:20 + 0-45 min jitter)
+    #   ~evening peak (17:20 + 0-45 min jitter)
+    # GitHub cron is UTC only, so each window is scheduled at both possible
+    # UK offsets and the guard step keeps whichever firing matches UK time.
+    - cron: '35 4 * * *'
+    - cron: '35 5 * * *'
+    - cron: '20 10 * * *'
+    - cron: '20 11 * * *'
+    - cron: '20 16 * * *'
+    - cron: '20 17 * * *'
   workflow_dispatch: {} # manual runs for testing
 
 permissions:
@@ -20,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - name: Skip the cron firing that is not ~05:35 UK time
+      - name: Keep only the cron firing that matches its UK-time window
         id: guard
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
@@ -28,14 +36,15 @@ jobs:
             exit 0
           fi
           HOUR=$(TZ=Europe/London date +%H)
-          if [ "$HOUR" = "05" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "Not the 05:xx UK firing (local hour $HOUR); skipping."
-            echo "run=false" >> "$GITHUB_OUTPUT"
-          fi
+          case "$HOUR" in
+            05|11|17) echo "run=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "UK local hour is $HOUR - this is the duplicate DST firing; skipping."
+              echo "run=false" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
-      - name: Random delay so the check lands at a random time around 6am
+      - name: Random delay so each check lands at a random time in its window
         if: steps.guard.outputs.run == 'true' && github.event_name == 'schedule'
         run: |
           DELAY=$((RANDOM % 2700)) # 0-45 minutes
@@ -50,15 +59,24 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies and browser
+      - name: Restore Chrome profile from previous runs
+        if: steps.guard.outputs.run == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .chrome-profile
+          key: chrome-profile-${{ github.run_id }}
+          restore-keys: chrome-profile-
+
+      - name: Install dependencies and real Chrome
         if: steps.guard.outputs.run == 'true'
         run: |
           npm install
-          npx playwright install --with-deps chromium
+          npx playwright install --with-deps chrome
 
-      - name: Check for available tests
+      - name: Check for available tests (headed Chrome in virtual display)
         if: steps.guard.outputs.run == 'true'
         env:
+          HEADLESS: 'false'
           DVSA_LICENCE_NUMBER: ${{ secrets.DVSA_LICENCE_NUMBER }}
           DVSA_BOOKING_REF: ${{ secrets.DVSA_BOOKING_REF }}
           DVSA_EARLIEST_DATE: ${{ vars.DVSA_EARLIEST_DATE }}
@@ -66,7 +84,7 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-        run: npm run check
+        run: xvfb-run --auto-servernum npm run check
 
       - name: Upload debug artifacts
         if: always() && steps.guard.outputs.run == 'true'

@@ -7,6 +7,11 @@
  * or confirming anything. If a date inside your preferred window is found,
  * an alert is sent (see src/notify.js). Your booking is never touched.
  *
+ * Browser authenticity: this launches the real Google Chrome (channel
+ * "chrome") rather than Playwright's bundled Chromium, uses a persistent
+ * profile so cookies survive between runs, and paces every interaction
+ * with human-like delays. It makes exactly one gentle pass per run.
+ *
  * Required env vars:
  *   DVSA_LICENCE_NUMBER   - your driving licence number
  *   DVSA_BOOKING_REF      - your test booking / application reference
@@ -15,7 +20,8 @@
  *   DVSA_EARLIEST_DATE    - ignore slots before this date (YYYY-MM-DD)
  *   DVSA_LATEST_DATE      - ignore slots after this date (YYYY-MM-DD).
  *                           If unset, any date earlier than today+6 months counts.
- *   HEADLESS              - set to "false" to watch the browser locally
+ *   HEADLESS              - "false" to run headed (recommended; CI uses xvfb)
+ *   USER_DATA_DIR         - persistent Chrome profile dir (default .chrome-profile)
  */
 
 import { chromium } from 'playwright';
@@ -24,6 +30,7 @@ import { sendAlert } from './notify.js';
 
 const LOGIN_URL = 'https://driverpracticaltest.dvsa.gov.uk/login';
 const ARTIFACT_DIR = process.env.ARTIFACT_DIR || 'artifacts';
+const USER_DATA_DIR = process.env.USER_DATA_DIR || '.chrome-profile';
 
 const licence = process.env.DVSA_LICENCE_NUMBER;
 const bookingRef = process.env.DVSA_BOOKING_REF;
@@ -44,6 +51,19 @@ function addMonthsISO(iso, months) {
   const d = new Date(iso + 'T00:00:00Z');
   d.setUTCMonth(d.getUTCMonth() + months);
   return d.toISOString().slice(0, 10);
+}
+
+const rand = (min, max) => min + Math.floor(Math.random() * (max - min));
+
+/** Human-like pause between actions. */
+const pause = (page, min = 900, max = 2600) => page.waitForTimeout(rand(min, max));
+
+/** Type character by character at a human-ish speed instead of instant fill. */
+async function humanType(page, selector, text) {
+  const field = page.locator(selector);
+  await field.click();
+  await pause(page, 300, 800);
+  await field.pressSequentially(text, { delay: rand(60, 140) });
 }
 
 async function saveDebug(page, name) {
@@ -80,16 +100,29 @@ function assertNotBlocked(html) {
   }
 }
 
-async function run() {
-  const browser = await chromium.launch({
+async function launchBrowser() {
+  const options = {
     headless: process.env.HEADLESS !== 'false',
-  });
-  const context = await browser.newContext({
+    viewport: { width: 1366, height: 768 },
     locale: 'en-GB',
     timezoneId: 'Europe/London',
-    viewport: { width: 1280, height: 900 },
-  });
-  const page = await context.newPage();
+  };
+  // Real Chrome first: its TLS/feature fingerprint matches an actual browser,
+  // unlike the bundled Chromium build. Fall back if Chrome isn't installed.
+  try {
+    return await chromium.launchPersistentContext(USER_DATA_DIR, {
+      ...options,
+      channel: 'chrome',
+    });
+  } catch (err) {
+    console.warn(`Real Chrome unavailable (${err.message.split('\n')[0]}); using Chromium.`);
+    return await chromium.launchPersistentContext(USER_DATA_DIR, options);
+  }
+}
+
+async function run() {
+  const context = await launchBrowser();
+  const page = context.pages()[0] ?? (await context.newPage());
   page.setDefaultTimeout(60_000);
 
   try {
@@ -97,10 +130,13 @@ async function run() {
     await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
+    await pause(page, 1500, 4000);
 
     // --- Log in ---------------------------------------------------------
-    await page.fill('#driving-licence-number', licence);
-    await page.fill('#application-reference-number', bookingRef);
+    await humanType(page, '#driving-licence-number', licence);
+    await pause(page);
+    await humanType(page, '#application-reference-number', bookingRef);
+    await pause(page);
     await page.click('#booking-login');
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
@@ -113,13 +149,16 @@ async function run() {
     }
 
     // --- Open the "change test date" flow --------------------------------
+    await pause(page, 1500, 4000);
     await page.click('#date-time-change');
     await waitThroughQueue(page);
+    await pause(page);
 
     // Ask for the earliest available dates rather than a specific one.
     const earliestChoice = page.locator('#test-choice-earliest');
     if (await earliestChoice.count()) {
       await earliestChoice.check();
+      await pause(page);
     }
     await page.click('#driving-licence-submit');
     await waitThroughQueue(page);
@@ -127,7 +166,7 @@ async function run() {
 
     // --- Read the availability calendar ----------------------------------
     // Bookable days carry the BookingCalendar-date--bookable class; each
-    // contains a link whose data-date (or href fragment) is the ISO date.
+    // contains a link whose data-date is the ISO date.
     await page.waitForSelector('.BookingCalendar-datesBody, .BookingCalendar', {
       timeout: 60_000,
     });
@@ -170,11 +209,12 @@ async function run() {
     } else {
       console.log('Nothing inside the preferred window; no alert sent.');
     }
+    await pause(page, 1000, 2500);
   } catch (err) {
     await saveDebug(page, 'failure');
     throw err;
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
 
