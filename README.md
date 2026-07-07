@@ -66,6 +66,18 @@ or both.
 You need an **existing test booking** — the checker uses the DVSA
 change-booking flow, which requires a licence number plus booking reference.
 
+### 0. Enable the schedule (one manual step)
+
+GitHub blocked the automation that created this branch from writing Actions
+workflow files, so the workflow lives at [`setup/daily-check.yml`](setup/daily-check.yml)
+and needs moving once:
+
+- On GitHub: open `setup/daily-check.yml` → pencil icon → change the
+  filename to `.github/workflows/daily-check.yml` → commit. Or locally:
+  `git mv setup/daily-check.yml .github/workflows/ && git commit -am "Enable workflow" && git push`
+
+Nothing runs until this file sits in `.github/workflows/`.
+
 ### 1. GitHub secrets
 
 In the repo: **Settings → Secrets and variables → Actions → Secrets**:
