@@ -1,0 +1,13 @@
+{
+  "name": "dvsa-test-availability-checker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless checker that logs into the DVSA change-booking service and alerts when earlier driving test slots are available. Alert only - it never books or moves a test.",
+  "type": "module",
+  "scripts": {
+    "check": "node src/check-tests.js"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}

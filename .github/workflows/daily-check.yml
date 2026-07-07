@@ -1,0 +1,78 @@
+name: Daily DVSA availability check
+
+on:
+  schedule:
+    # GitHub cron is UTC only, so both possible UK offsets are scheduled and
+    # the guard step below keeps whichever one is 05:35 Europe/London time.
+    - cron: '35 4 * * *' # 05:35 UK during BST (summer)
+    - cron: '35 5 * * *' # 05:35 UK during GMT (winter)
+  workflow_dispatch: {} # manual runs for testing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dvsa-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Skip the cron firing that is not ~05:35 UK time
+        id: guard
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          HOUR=$(TZ=Europe/London date +%H)
+          if [ "$HOUR" = "05" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Not the 05:xx UK firing (local hour $HOUR); skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Random delay so the check lands at a random time around 6am
+        if: steps.guard.outputs.run == 'true' && github.event_name == 'schedule'
+        run: |
+          DELAY=$((RANDOM % 2700)) # 0-45 minutes
+          echo "Sleeping ${DELAY}s (~$((DELAY / 60)) min)"
+          sleep "$DELAY"
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.run == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.run == 'true'
+        with:
+          node-version: 20
+
+      - name: Install dependencies and browser
+        if: steps.guard.outputs.run == 'true'
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Check for available tests
+        if: steps.guard.outputs.run == 'true'
+        env:
+          DVSA_LICENCE_NUMBER: ${{ secrets.DVSA_LICENCE_NUMBER }}
+          DVSA_BOOKING_REF: ${{ secrets.DVSA_BOOKING_REF }}
+          DVSA_EARLIEST_DATE: ${{ vars.DVSA_EARLIEST_DATE }}
+          DVSA_LATEST_DATE: ${{ vars.DVSA_LATEST_DATE }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+        run: npm run check
+
+      - name: Upload debug artifacts
+        if: always() && steps.guard.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dvsa-check-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 5
