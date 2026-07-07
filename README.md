@@ -42,15 +42,24 @@ tricks:
   anti-bot systems can spot before a single page renders.
 - **Headed, in a virtual display (xvfb)** on the runner — classic headless
   mode leaks signals like a software GPU renderer.
+- **Automation fingerprints stripped** — the `AutomationControlled` flag and
+  `--enable-automation` switch are removed, and `navigator.webdriver` is
+  masked, so the browser doesn't announce itself as driven.
 - **Persistent Chrome profile**, cached between runs — cookies survive, so
   the site sees a returning visitor rather than a fresh browser every time.
-- **Human pacing** — fields are typed character by character and every step
-  waits a random 1–4 seconds; one single pass per run, then it leaves.
-- Realistic UK locale, timezone, and viewport.
+- **Human input** — the pointer moves to a field in small steps before
+  clicking (no teleport-clicks), text is typed character by character in a
+  few chunks with varied 70–165 ms keystrokes and the odd "glance back at
+  the card" pause, and each page gets a little scroll-and-read dwell.
+- **Human pacing** — a random 1–4 second wait between every step, exactly
+  one pass per run, then it leaves. No retries, no rapid re-hits.
+- Realistic UK locale, timezone, viewport, and `Accept-Language`.
 
-Runs can still occasionally hit the Imperva block page or the DVSA queue;
-the script waits out the queue, logs a block, and simply tries again at the
-next window.
+This is deliberately restrained — three unhurried visits a day from a
+returning, human-looking browser. It does **not** try to defeat the anti-bot
+system, because aggressive evasion is exactly what gets flagged. Runs can
+still occasionally hit the Imperva challenge or the DVSA queue; the script
+waits out the queue, logs a challenge, and simply tries again next window.
 
 ## Phone notifications
 

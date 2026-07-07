@@ -7,11 +7,11 @@
  * If bookable dates fall inside your preferred window, it sends an alert
  * (see src/notify.js).
  *
- * Because DVSA can change their markup and this journey has several steps,
- * every step saves a screenshot + HTML dump to ARTIFACT_DIR, and each step
- * tries several likely selectors before giving up with a clear message. That
- * makes the first real run self-documenting: if a selector is wrong, the
- * uploaded artifact shows exactly what the page looked like so it can be fixed.
+ * Looking human: it drives the real Google Chrome, keeps a persistent profile
+ * so it's a returning visitor, strips the usual automation fingerprints,
+ * moves the mouse to a field before clicking, and types character by character
+ * in short chunks with varied speed and the odd "reading the card" pause. It
+ * makes ONE gentle pass per run - no retry storms.
  *
  * Required env vars:
  *   DVSA_LICENCE_NUMBER   - your driving licence number
@@ -20,8 +20,7 @@
  *
  * Optional env vars:
  *   DVSA_TEST_TYPE        - test category (default "car")
- *   DVSA_CENTRE_MATCH     - if set, pick the centre whose name contains this
- *                           text (case-insensitive) instead of the first result
+ *   DVSA_CENTRE_MATCH     - pick the centre whose name contains this text
  *   DVSA_EARLIEST_DATE    - ignore slots before this date (YYYY-MM-DD)
  *   DVSA_LATEST_DATE      - ignore slots after this date (default today+6mo)
  *   HEADLESS              - "false" to run headed (CI runs headed under xvfb)
@@ -63,8 +62,21 @@ function addMonthsISO(iso, months) {
   return d.toISOString().slice(0, 10);
 }
 
-const rand = (min, max) => min + Math.floor(Math.random() * (max - min));
+const rand = (min, max) => min + Math.floor(Math.random() * (max - min + 1));
+
+/** Human-like pause between actions. */
 const pause = (page, min = 900, max = 2600) => page.waitForTimeout(rand(min, max));
+
+const UA_CHROME =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) ' +
+  'Chrome/126.0.0.0 Safari/537.36';
+
+// Fingerprint tweaks so an automated Chrome does not announce itself.
+const STEALTH_ARGS = [
+  '--disable-blink-features=AutomationControlled',
+  '--no-first-run',
+  '--no-default-browser-check',
+];
 
 let stepNo = 0;
 async function snapshot(page, label) {
@@ -80,12 +92,50 @@ async function snapshot(page, label) {
   }
 }
 
-/** Type text at a human-ish speed into the first candidate selector present. */
+/** Move the pointer to a target in small steps, then click - not a teleport-click. */
+async function humanClick(page, locator) {
+  try {
+    const box = await locator.boundingBox();
+    if (box) {
+      const x = box.x + box.width / 2 + rand(-6, 6);
+      const y = box.y + box.height / 2 + rand(-4, 4);
+      await page.mouse.move(x, y, { steps: rand(6, 20) });
+      await page.waitForTimeout(rand(90, 280));
+    }
+  } catch {
+    /* boundingBox can fail for off-screen elements; fall through to click */
+  }
+  await locator.click();
+}
+
+function splitIntoChunks(s, n) {
+  n = Math.max(1, Math.min(n, s.length));
+  const size = Math.ceil(s.length / n);
+  const out = [];
+  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+  return out;
+}
+
+/** Type into the first present candidate the way a person copying off a card would. */
 async function humanType(page, candidates, text, what) {
   const el = await firstPresent(page, candidates, what);
-  await el.click();
-  await pause(page, 250, 700);
-  await el.pressSequentially(text, { delay: rand(60, 140) });
+  await humanClick(page, el);
+  await pause(page, 300, 800);
+  const chunks = splitIntoChunks(text, rand(2, 4));
+  for (let i = 0; i < chunks.length; i++) {
+    await el.pressSequentially(chunks[i], { delay: rand(70, 165) });
+    if (i < chunks.length - 1) await page.waitForTimeout(rand(250, 850)); // glance back at the card
+  }
+}
+
+/** A little idle time reading the page: a small scroll and a pause. */
+async function dwell(page) {
+  try {
+    await page.mouse.wheel(0, rand(120, 480));
+  } catch {
+    /* ignore */
+  }
+  await pause(page, 700, 2200);
 }
 
 /** Return a locator for the first of `candidates` that exists, else throw. */
@@ -101,12 +151,12 @@ async function firstPresent(page, candidates, what) {
   );
 }
 
-/** Click the first present candidate; returns false if none exist. */
+/** Click the first present candidate (human-style); returns false if none exist. */
 async function clickIfPresent(page, candidates) {
   for (const sel of candidates) {
     const loc = page.locator(sel).first();
     if (await loc.count().catch(() => 0)) {
-      await loc.click();
+      await humanClick(page, loc);
       return true;
     }
   }
@@ -137,18 +187,39 @@ function assertNotBlocked(html) {
 }
 
 async function launchBrowser() {
-  const options = {
+  const common = {
     headless: process.env.HEADLESS !== 'false',
-    viewport: { width: 1366, height: 768 },
+    viewport: { width: 1366 + rand(-40, 40), height: 768 + rand(-30, 30) },
     locale: 'en-GB',
     timezoneId: 'Europe/London',
+    args: STEALTH_ARGS,
+    ignoreDefaultArgs: ['--enable-automation'],
+    extraHTTPHeaders: { 'Accept-Language': 'en-GB,en;q=0.9' },
   };
+  let context;
   try {
-    return await chromium.launchPersistentContext(USER_DATA_DIR, { ...options, channel: 'chrome' });
+    // Real Chrome: authentic TLS + feature fingerprint, unlike bundled Chromium.
+    context = await chromium.launchPersistentContext(USER_DATA_DIR, {
+      ...common,
+      channel: 'chrome',
+    });
   } catch (err) {
     console.warn(`Real Chrome unavailable (${err.message.split('\n')[0]}); using Chromium.`);
-    return await chromium.launchPersistentContext(USER_DATA_DIR, options);
+    context = await chromium.launchPersistentContext(USER_DATA_DIR, {
+      ...common,
+      userAgent: UA_CHROME,
+    });
   }
+  // Belt-and-braces masking of the residual automation tells. Real Chrome
+  // already covers most of this; harmless where it does.
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    if (!navigator.languages || !navigator.languages.length) {
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
+    }
+    window.chrome = window.chrome || { runtime: {} };
+  });
+  return context;
 }
 
 async function run() {
@@ -157,15 +228,16 @@ async function run() {
   page.setDefaultTimeout(60_000);
 
   try {
-    console.log(`Looking for "${testType}" slots near "${centreQuery}" between ${earliest} and ${latest}.`);
+    console.log(
+      `Looking for "${testType}" slots near "${centreQuery}" between ${earliest} and ${latest}.`
+    );
 
     // 1. Landing / start ---------------------------------------------------
     await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
     await snapshot(page, 'landing');
-    await pause(page, 1500, 3500);
-    // Some entry pages have a "Start now" button before the test-type step.
+    await dwell(page);
     await clickIfPresent(page, [
       'a:has-text("Start now")',
       'button:has-text("Start now")',
@@ -174,14 +246,12 @@ async function run() {
     await waitThroughQueue(page);
 
     // 2. Test type ---------------------------------------------------------
-    // Radio like #test-category-car / value="Car"; label text as a fallback.
     const picked =
       (await clickIfPresent(page, [
         `#test-category-${testType}`,
         `input[value="${testType}" i]`,
         `label:has-text("${testType}") >> input[type=radio]`,
-      ])) ||
-      (await clickIfPresent(page, [`label:has-text("${testType}")`]));
+      ])) || (await clickIfPresent(page, [`label:has-text("${testType}")`]));
     if (picked) {
       await pause(page);
       await clickIfPresent(page, [
@@ -193,6 +263,7 @@ async function run() {
       await waitThroughQueue(page);
     }
     await snapshot(page, 'after-test-type');
+    await dwell(page);
 
     // 3. Driving licence number -------------------------------------------
     await humanType(
@@ -211,6 +282,7 @@ async function run() {
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
     await snapshot(page, 'after-licence');
+    await dwell(page);
 
     // 4. Theory test certificate number -----------------------------------
     await humanType(
@@ -233,6 +305,7 @@ async function run() {
     ]);
     await waitThroughQueue(page);
     await snapshot(page, 'after-theory');
+    await dwell(page);
 
     // 5. Instructor / personal reference: answer "no" and continue --------
     await clickIfPresent(page, [
@@ -240,13 +313,10 @@ async function run() {
       'input[value="no" i]',
       'label:has-text("No") >> input[type=radio]',
     ]);
-    await clickIfPresent(page, [
-      'button:has-text("Continue")',
-      'button[type=submit]',
-      '.govuk-button',
-    ]);
+    await clickIfPresent(page, ['button:has-text("Continue")', 'button[type=submit]', '.govuk-button']);
     await waitThroughQueue(page);
     await snapshot(page, 'after-instructor');
+    await dwell(page);
 
     // 6. Test centre search -----------------------------------------------
     await humanType(
@@ -265,8 +335,8 @@ async function run() {
     ]);
     await waitThroughQueue(page);
     await snapshot(page, 'centre-results');
+    await dwell(page);
 
-    // Choose a centre from the results.
     const centreLinks = page.locator(
       '.test-centre-details-link, a.test-centre, .test-centre-results a, ol li a'
     );
@@ -284,8 +354,10 @@ async function run() {
         }
       }
     }
-    console.log(`  Selecting centre: ${(await chosen.textContent().catch(() => '')).trim().slice(0, 60)}`);
-    await chosen.click();
+    console.log(
+      `  Selecting centre: ${(await chosen.textContent().catch(() => '')).trim().slice(0, 60)}`
+    );
+    await humanClick(page, chosen);
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
     await snapshot(page, 'calendar');
