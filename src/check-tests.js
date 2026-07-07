@@ -1,26 +1,30 @@
 /**
- * DVSA driving test availability checker - ALERT ONLY.
+ * DVSA driving test availability checker - ALERT ONLY (book-a-test flow).
  *
- * Logs into the DVSA "change your driving test" service with your licence
- * number + booking reference, opens the date-change calendar for your test
- * centre, records which dates are bookable, then leaves WITHOUT selecting
- * or confirming anything. If a date inside your preferred window is found,
- * an alert is sent (see src/notify.js). Your booking is never touched.
+ * This walks the public "book your driving test" journey far enough to read
+ * the availability calendar for a test centre, then STOPS. It never selects a
+ * slot, never enters personal or payment details, and never books anything.
+ * If bookable dates fall inside your preferred window, it sends an alert
+ * (see src/notify.js).
  *
- * Browser authenticity: this launches the real Google Chrome (channel
- * "chrome") rather than Playwright's bundled Chromium, uses a persistent
- * profile so cookies survive between runs, and paces every interaction
- * with human-like delays. It makes exactly one gentle pass per run.
+ * Because DVSA can change their markup and this journey has several steps,
+ * every step saves a screenshot + HTML dump to ARTIFACT_DIR, and each step
+ * tries several likely selectors before giving up with a clear message. That
+ * makes the first real run self-documenting: if a selector is wrong, the
+ * uploaded artifact shows exactly what the page looked like so it can be fixed.
  *
  * Required env vars:
  *   DVSA_LICENCE_NUMBER   - your driving licence number
- *   DVSA_BOOKING_REF      - your test booking / application reference
+ *   DVSA_THEORY_NUMBER    - your theory test pass certificate number
+ *   DVSA_TEST_CENTRE      - postcode or town to search for a test centre
  *
  * Optional env vars:
+ *   DVSA_TEST_TYPE        - test category (default "car")
+ *   DVSA_CENTRE_MATCH     - if set, pick the centre whose name contains this
+ *                           text (case-insensitive) instead of the first result
  *   DVSA_EARLIEST_DATE    - ignore slots before this date (YYYY-MM-DD)
- *   DVSA_LATEST_DATE      - ignore slots after this date (YYYY-MM-DD).
- *                           If unset, any date earlier than today+6 months counts.
- *   HEADLESS              - "false" to run headed (recommended; CI uses xvfb)
+ *   DVSA_LATEST_DATE      - ignore slots after this date (default today+6mo)
+ *   HEADLESS              - "false" to run headed (CI runs headed under xvfb)
  *   USER_DATA_DIR         - persistent Chrome profile dir (default .chrome-profile)
  */
 
@@ -28,15 +32,22 @@ import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { sendAlert } from './notify.js';
 
-const LOGIN_URL = 'https://driverpracticaltest.dvsa.gov.uk/login';
+const START_URL = process.env.DVSA_START_URL || 'https://driverpracticaltest.dvsa.gov.uk/';
 const ARTIFACT_DIR = process.env.ARTIFACT_DIR || 'artifacts';
 const USER_DATA_DIR = process.env.USER_DATA_DIR || '.chrome-profile';
 
 const licence = process.env.DVSA_LICENCE_NUMBER;
-const bookingRef = process.env.DVSA_BOOKING_REF;
+const theory = process.env.DVSA_THEORY_NUMBER;
+const centreQuery = process.env.DVSA_TEST_CENTRE;
+const testType = (process.env.DVSA_TEST_TYPE || 'car').toLowerCase();
+const centreMatch = (process.env.DVSA_CENTRE_MATCH || '').toLowerCase();
 
-if (!licence || !bookingRef) {
-  console.error('DVSA_LICENCE_NUMBER and DVSA_BOOKING_REF must be set.');
+const missing = [];
+if (!licence) missing.push('DVSA_LICENCE_NUMBER');
+if (!theory) missing.push('DVSA_THEORY_NUMBER');
+if (!centreQuery) missing.push('DVSA_TEST_CENTRE');
+if (missing.length) {
+  console.error(`Missing required env vars: ${missing.join(', ')}`);
   process.exit(2);
 }
 
@@ -46,7 +57,6 @@ const latest = process.env.DVSA_LATEST_DATE || addMonthsISO(todayISO(), 6);
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
-
 function addMonthsISO(iso, months) {
   const d = new Date(iso + 'T00:00:00Z');
   d.setUTCMonth(d.getUTCMonth() + months);
@@ -54,37 +64,63 @@ function addMonthsISO(iso, months) {
 }
 
 const rand = (min, max) => min + Math.floor(Math.random() * (max - min));
-
-/** Human-like pause between actions. */
 const pause = (page, min = 900, max = 2600) => page.waitForTimeout(rand(min, max));
 
-/** Type character by character at a human-ish speed instead of instant fill. */
-async function humanType(page, selector, text) {
-  const field = page.locator(selector);
-  await field.click();
-  await pause(page, 300, 800);
-  await field.pressSequentially(text, { delay: rand(60, 140) });
-}
-
-async function saveDebug(page, name) {
+let stepNo = 0;
+async function snapshot(page, label) {
+  stepNo += 1;
+  const name = `${String(stepNo).padStart(2, '0')}-${label}`;
   try {
     mkdirSync(ARTIFACT_DIR, { recursive: true });
     await page.screenshot({ path: `${ARTIFACT_DIR}/${name}.png`, fullPage: true });
     writeFileSync(`${ARTIFACT_DIR}/${name}.html`, await page.content());
+    console.log(`  [snapshot] ${name}  (url: ${page.url()})`);
   } catch (err) {
-    console.error(`Could not save debug artifacts (${name}):`, err.message);
+    console.error(`  Could not save snapshot ${name}:`, err.message);
   }
 }
 
-/** The service sits behind a waiting-room queue at busy times; wait it out. */
+/** Type text at a human-ish speed into the first candidate selector present. */
+async function humanType(page, candidates, text, what) {
+  const el = await firstPresent(page, candidates, what);
+  await el.click();
+  await pause(page, 250, 700);
+  await el.pressSequentially(text, { delay: rand(60, 140) });
+}
+
+/** Return a locator for the first of `candidates` that exists, else throw. */
+async function firstPresent(page, candidates, what) {
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if (await loc.count().catch(() => 0)) return loc;
+  }
+  await snapshot(page, `NOTFOUND-${what}`.replace(/\s+/g, '-'));
+  throw new Error(
+    `Could not find "${what}" on the page (tried: ${candidates.join(', ')}). ` +
+      `See the uploaded artifact to update the selector.`
+  );
+}
+
+/** Click the first present candidate; returns false if none exist. */
+async function clickIfPresent(page, candidates) {
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if (await loc.count().catch(() => 0)) {
+      await loc.click();
+      return true;
+    }
+  }
+  return false;
+}
+
 async function waitThroughQueue(page) {
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
     const url = page.url();
     const body = (await page.textContent('body').catch(() => '')) || '';
-    const queued =
-      url.includes('queue.driverpracticaltest') || /queue|waiting room/i.test(body.slice(0, 2000));
-    if (!queued) return;
+    if (!url.includes('queue.driverpracticaltest') && !/waiting room/i.test(body.slice(0, 2000))) {
+      return;
+    }
     console.log('In the DVSA queue, waiting 30s...');
     await page.waitForTimeout(30_000);
   }
@@ -92,10 +128,10 @@ async function waitThroughQueue(page) {
 }
 
 function assertNotBlocked(html) {
-  if (/incapsula|imperva|request unsuccessful|access denied/i.test(html)) {
+  if (/_Incapsula_Resource|incapsula|imperva|request unsuccessful|access denied/i.test(html)) {
     throw new Error(
-      'The DVSA site served an anti-bot block page instead of the service. ' +
-        'Nothing to do but try again on the next scheduled run.'
+      'DVSA served an anti-bot challenge page instead of the service. ' +
+        'This can happen from datacentre IPs; it will retry on the next scheduled run.'
     );
   }
 }
@@ -107,13 +143,8 @@ async function launchBrowser() {
     locale: 'en-GB',
     timezoneId: 'Europe/London',
   };
-  // Real Chrome first: its TLS/feature fingerprint matches an actual browser,
-  // unlike the bundled Chromium build. Fall back if Chrome isn't installed.
   try {
-    return await chromium.launchPersistentContext(USER_DATA_DIR, {
-      ...options,
-      channel: 'chrome',
-    });
+    return await chromium.launchPersistentContext(USER_DATA_DIR, { ...options, channel: 'chrome' });
   } catch (err) {
     console.warn(`Real Chrome unavailable (${err.message.split('\n')[0]}); using Chromium.`);
     return await chromium.launchPersistentContext(USER_DATA_DIR, options);
@@ -126,51 +157,141 @@ async function run() {
   page.setDefaultTimeout(60_000);
 
   try {
-    console.log(`Checking for slots between ${earliest} and ${latest}.`);
-    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded' });
+    console.log(`Looking for "${testType}" slots near "${centreQuery}" between ${earliest} and ${latest}.`);
+
+    // 1. Landing / start ---------------------------------------------------
+    await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
-    await pause(page, 1500, 4000);
-
-    // --- Log in ---------------------------------------------------------
-    await humanType(page, '#driving-licence-number', licence);
-    await pause(page);
-    await humanType(page, '#application-reference-number', bookingRef);
-    await pause(page);
-    await page.click('#booking-login');
+    await snapshot(page, 'landing');
+    await pause(page, 1500, 3500);
+    // Some entry pages have a "Start now" button before the test-type step.
+    await clickIfPresent(page, [
+      'a:has-text("Start now")',
+      'button:has-text("Start now")',
+      '.govuk-button--start',
+    ]);
     await waitThroughQueue(page);
-    assertNotBlocked(await page.content());
 
-    const loginError = await page
-      .textContent('.error-summary, .govuk-error-summary')
-      .catch(() => null);
-    if (loginError) {
-      throw new Error(`DVSA rejected the login details: ${loginError.trim().slice(0, 300)}`);
-    }
-
-    // --- Open the "change test date" flow --------------------------------
-    await pause(page, 1500, 4000);
-    await page.click('#date-time-change');
-    await waitThroughQueue(page);
-    await pause(page);
-
-    // Ask for the earliest available dates rather than a specific one.
-    const earliestChoice = page.locator('#test-choice-earliest');
-    if (await earliestChoice.count()) {
-      await earliestChoice.check();
+    // 2. Test type ---------------------------------------------------------
+    // Radio like #test-category-car / value="Car"; label text as a fallback.
+    const picked =
+      (await clickIfPresent(page, [
+        `#test-category-${testType}`,
+        `input[value="${testType}" i]`,
+        `label:has-text("${testType}") >> input[type=radio]`,
+      ])) ||
+      (await clickIfPresent(page, [`label:has-text("${testType}")`]));
+    if (picked) {
       await pause(page);
+      await clickIfPresent(page, [
+        '#driving-licence-submit',
+        'button:has-text("Continue")',
+        'button[type=submit]',
+        '.govuk-button',
+      ]);
+      await waitThroughQueue(page);
     }
-    await page.click('#driving-licence-submit');
+    await snapshot(page, 'after-test-type');
+
+    // 3. Driving licence number -------------------------------------------
+    await humanType(
+      page,
+      ['#driving-licence-number', 'input[name="driving-licence-number" i]', '#dln'],
+      licence,
+      'driving licence field'
+    );
+    await pause(page);
+    await clickIfPresent(page, [
+      '#driving-licence-submit',
+      'button:has-text("Continue")',
+      'button[type=submit]',
+      '.govuk-button',
+    ]);
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
+    await snapshot(page, 'after-licence');
 
-    // --- Read the availability calendar ----------------------------------
-    // Bookable days carry the BookingCalendar-date--bookable class; each
-    // contains a link whose data-date is the ISO date.
-    await page.waitForSelector('.BookingCalendar-datesBody, .BookingCalendar', {
-      timeout: 60_000,
-    });
+    // 4. Theory test certificate number -----------------------------------
+    await humanType(
+      page,
+      [
+        '#theory-test-number',
+        'input[name="theory-test-number" i]',
+        'input[name*="theory" i]',
+        '#theoryTestNumber',
+      ],
+      theory,
+      'theory test number field'
+    );
+    await pause(page);
+    await clickIfPresent(page, [
+      'button:has-text("Continue")',
+      '#theory-test-submit',
+      'button[type=submit]',
+      '.govuk-button',
+    ]);
+    await waitThroughQueue(page);
+    await snapshot(page, 'after-theory');
 
+    // 5. Instructor / personal reference: answer "no" and continue --------
+    await clickIfPresent(page, [
+      '#instructor-referral-no',
+      'input[value="no" i]',
+      'label:has-text("No") >> input[type=radio]',
+    ]);
+    await clickIfPresent(page, [
+      'button:has-text("Continue")',
+      'button[type=submit]',
+      '.govuk-button',
+    ]);
+    await waitThroughQueue(page);
+    await snapshot(page, 'after-instructor');
+
+    // 6. Test centre search -----------------------------------------------
+    await humanType(
+      page,
+      ['#test-centres-input', 'input[name="test-centres" i]', 'input[name*="centre" i]', '#postcode'],
+      centreQuery,
+      'test centre search box'
+    );
+    await pause(page);
+    await clickIfPresent(page, [
+      '#test-centres-submit',
+      'button:has-text("Find")',
+      'button:has-text("Search")',
+      'button[type=submit]',
+      '.govuk-button',
+    ]);
+    await waitThroughQueue(page);
+    await snapshot(page, 'centre-results');
+
+    // Choose a centre from the results.
+    const centreLinks = page.locator(
+      '.test-centre-details-link, a.test-centre, .test-centre-results a, ol li a'
+    );
+    const count = await centreLinks.count().catch(() => 0);
+    if (!count) {
+      throw new Error('No test centres appeared for the search - check DVSA_TEST_CENTRE.');
+    }
+    let chosen = centreLinks.first();
+    if (centreMatch) {
+      for (let i = 0; i < count; i++) {
+        const t = (await centreLinks.nth(i).textContent().catch(() => '')) || '';
+        if (t.toLowerCase().includes(centreMatch)) {
+          chosen = centreLinks.nth(i);
+          break;
+        }
+      }
+    }
+    console.log(`  Selecting centre: ${(await chosen.textContent().catch(() => '')).trim().slice(0, 60)}`);
+    await chosen.click();
+    await waitThroughQueue(page);
+    assertNotBlocked(await page.content());
+    await snapshot(page, 'calendar');
+
+    // 7. Read the availability calendar -----------------------------------
+    await page.waitForSelector('.BookingCalendar-datesBody, .BookingCalendar', { timeout: 60_000 });
     const dates = await page.$$eval(
       '.BookingCalendar-date--bookable a, td.BookingCalendar-date--bookable',
       (els) =>
@@ -187,22 +308,20 @@ async function run() {
     const unique = [...new Set(dates)].sort();
     console.log(
       unique.length
-        ? `Bookable dates on the calendar: ${unique.join(', ')}`
-        : 'No bookable dates shown on the calendar.'
+        ? `  Bookable dates on the calendar: ${unique.join(', ')}`
+        : '  No bookable dates shown on the calendar.'
     );
 
     const matches = unique.filter((d) => d >= earliest && d <= latest);
 
-    // Alert only: we deliberately stop here. No date is clicked, no slot is
-    // reserved, and the existing booking is left exactly as it was.
+    // ALERT ONLY: stop here. No slot is selected; no booking is made.
     if (matches.length) {
-      await saveDebug(page, 'availability-found');
       await sendAlert({
         title: 'DVSA: driving test slots available!',
         message:
-          `Slots inside your window (${earliest} to ${latest}):\n` +
+          `"${testType}" slots near ${centreQuery} in your window (${earliest} to ${latest}):\n` +
           matches.join('\n') +
-          '\n\nBook manually at https://driverpracticaltest.dvsa.gov.uk/login',
+          '\n\nBook manually at https://driverpracticaltest.dvsa.gov.uk/',
         dates: matches,
       });
       console.log(`ALERT SENT for ${matches.length} date(s).`);
@@ -211,7 +330,7 @@ async function run() {
     }
     await pause(page, 1000, 2500);
   } catch (err) {
-    await saveDebug(page, 'failure');
+    await snapshot(page, 'failure');
     throw err;
   } finally {
     await context.close();

@@ -1,13 +1,20 @@
 # DVSA driving test availability checker (alert only)
 
-A headless-server script that checks the DVSA **change your driving test**
-service a few times a day — at a random time around 6am and at random times
-around the midday and evening peaks — logs in with your licence details, and
-pings your phone if test dates are available in your preferred window.
+A headless-server script that walks the DVSA **book your driving test**
+journey a few times a day — at a random time around 6am and at random times
+around the midday and evening peaks — and pings your phone if test dates are
+available at your chosen test centre in your preferred window.
 
-**It never books, moves, or cancels anything.** It reads the availability
-calendar and leaves. You book manually at
-<https://driverpracticaltest.dvsa.gov.uk/login> when an alert comes in.
+**It never books anything.** It goes as far as the availability calendar,
+reads the dates, and stops — no slot is selected, and no personal or payment
+details are ever entered. You book manually at
+<https://driverpracticaltest.dvsa.gov.uk/> when an alert comes in.
+
+> DVSA won't show you any dates until you've identified yourself, so the
+> journey needs your **driving licence number** *and* your **theory test
+> pass certificate number**, plus a **test centre** to search. Licence
+> number alone isn't enough — that's a DVSA gate, not a limitation of this
+> script.
 
 ## Schedule
 
@@ -63,9 +70,6 @@ or both.
 
 ## Setup
 
-You need an **existing test booking** — the checker uses the DVSA
-change-booking flow, which requires a licence number plus booking reference.
-
 ### 0. Enable the schedule (one manual step)
 
 GitHub blocked the automation that created this branch from writing Actions
@@ -80,34 +84,38 @@ Nothing runs until this file sits in `.github/workflows/`.
 
 ### 1. GitHub secrets
 
-In the repo: **Settings → Secrets and variables → Actions → Secrets**:
+Private details go in **Settings → Secrets and variables → Actions → Secrets**:
 
 | Secret | Required | Value |
 | --- | --- | --- |
 | `DVSA_LICENCE_NUMBER` | yes | Your driving licence number |
-| `DVSA_BOOKING_REF` | yes | Your booking/application reference |
+| `DVSA_THEORY_NUMBER` | yes | Your theory test pass certificate number |
 | `NTFY_TOPIC` | one alert channel | A hard-to-guess ntfy topic |
 | `NTFY_SERVER` | no | Only if self-hosting ntfy (defaults to `https://ntfy.sh`) |
 | `ALERT_WEBHOOK_URL` | one alert channel | Any URL accepting a JSON POST |
 
-### 2. Optional date window
+### 2. Where and when to look
 
-Under **Secrets and variables → Actions → Variables** (not secrets):
+Non-secret settings go in the **Variables** tab (next to Secrets):
 
-| Variable | Meaning |
-| --- | --- |
-| `DVSA_EARLIEST_DATE` | Ignore slots before this date (`YYYY-MM-DD`) |
-| `DVSA_LATEST_DATE` | Ignore slots after this date. Default: 6 months out |
-
-Set `DVSA_LATEST_DATE` to the day before your current test to only be
-alerted about **earlier** slots.
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `DVSA_TEST_CENTRE` | yes | Postcode or town to search, e.g. `SW1A 1AA` |
+| `DVSA_CENTRE_MATCH` | no | Pick the centre whose name contains this text (else the first result) |
+| `DVSA_TEST_TYPE` | no | Test category, default `car` |
+| `DVSA_EARLIEST_DATE` | no | Ignore slots before this date (`YYYY-MM-DD`) |
+| `DVSA_LATEST_DATE` | no | Ignore slots after this date. Default: 6 months out |
 
 ### 3. Test it
 
 Run the workflow manually: **Actions → DVSA availability check →
 Run workflow**. Manual runs skip the random delay. Each run uploads a
-screenshot + HTML dump as a workflow artifact, which is the first place to
-look if something breaks.
+**numbered screenshot + HTML dump of every step** (`01-landing`,
+`02-after-test-type`, …) as a workflow artifact. On the very first run this
+is important: the book-a-test journey has several pages, and if DVSA's field
+IDs differ from the script's guesses, the step named `NOTFOUND-…` shows
+exactly which page and field needs its selector corrected in
+`src/check-tests.js`.
 
 ## Running locally
 
@@ -120,9 +128,17 @@ HEADLESS=false npm run check
 
 ## Caveats
 
-- DVSA occasionally changes their page markup; if runs start failing, the
-  selectors in `src/check-tests.js` are the place to update (the uploaded
-  HTML artifact shows what the page looked like).
+- **Selectors are best-effort.** The book-a-test journey's exact field IDs
+  couldn't be verified against the live site while this was written (DVSA's
+  anti-bot layer blocks automated access to confirm them), so the script
+  tries several likely selectors per step and records each page. If a step
+  fails, open that step's screenshot/HTML in the artifact and adjust the
+  candidate list in `src/check-tests.js` — the code is structured to make
+  that a one-line change.
+- **Datacentre IPs get challenged.** DVSA uses Imperva/Incapsula. GitHub's
+  shared runner IPs may sometimes be served a challenge page; the script
+  detects this, logs it, and retries next window. If it's persistent, run
+  the same script from a home machine or Raspberry Pi (a residential IP is
+  trusted far more) — it's the identical `npm run check`.
 - Keep the schedule light. Hammering the service is against DVSA's terms
-  and will get the runner's IPs blocked — three spread-out checks a day is
-  the point.
+  and will get IPs blocked — three spread-out checks a day is the point.

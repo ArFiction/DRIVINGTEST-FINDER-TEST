@@ -78,7 +78,10 @@ jobs:
         env:
           HEADLESS: 'false'
           DVSA_LICENCE_NUMBER: ${{ secrets.DVSA_LICENCE_NUMBER }}
-          DVSA_BOOKING_REF: ${{ secrets.DVSA_BOOKING_REF }}
+          DVSA_THEORY_NUMBER: ${{ secrets.DVSA_THEORY_NUMBER }}
+          DVSA_TEST_CENTRE: ${{ vars.DVSA_TEST_CENTRE }}
+          DVSA_CENTRE_MATCH: ${{ vars.DVSA_CENTRE_MATCH }}
+          DVSA_TEST_TYPE: ${{ vars.DVSA_TEST_TYPE }}
           DVSA_EARLIEST_DATE: ${{ vars.DVSA_EARLIEST_DATE }}
           DVSA_LATEST_DATE: ${{ vars.DVSA_LATEST_DATE }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
