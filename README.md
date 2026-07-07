@@ -16,6 +16,21 @@ details are ever entered. You book manually at
 > number alone isn't enough — that's a DVSA gate, not a limitation of this
 > script.
 
+## ⚠️ Before you use this: DVSA's terms
+
+Be aware: **DVSA's 2026 booking terms prohibit automated access to the
+service** — and that wording covers automated *interaction*, not just automated
+booking, so even this read-only checker is against the letter of their terms.
+DVSA has suspended 1,000+ licence numbers for "unusual booking activity". For a
+low-volume, own-data, read-only tool like this the realistic worst case isn't
+legal trouble — it's **your licence number getting flagged and your booking
+cancelled or blocked**, which hits the very test you're trying to bring forward.
+
+This is defensible on intent (personal, low-impact, never books) but not on
+compliance. Keeping it to ~3 quiet checks a day from your own connection, and
+stopping if DVSA ever objects, is the sensible line. Your call — the
+[detailed notes](docs/anti-bot-notes.md) lay out the full picture.
+
 ## Schedule
 
 Three checks a day, each at a random time inside its window (GitHub's own

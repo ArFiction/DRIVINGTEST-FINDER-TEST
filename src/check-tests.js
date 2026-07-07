@@ -133,6 +133,38 @@ async function clickIfPresent(page, candidates) {
   return false;
 }
 
+/** Human-type into the first present candidate; returns false if none (no throw). */
+async function typeIfPresent(page, candidates, text) {
+  for (const sel of candidates) {
+    const loc = page.locator(sel).first();
+    if (await loc.count().catch(() => 0)) {
+      await humanType(page, loc, text);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The new-booking candidate page may ask about an extended test and special
+ * requirements. Pick the plain options (no / none) if present; harmless if not.
+ */
+async function handleCandidateOptions(page) {
+  await clickIfPresent(page, ['#extended-test-no', 'input[name*="extended" i][value="no" i]']);
+  await clickIfPresent(page, ['#special-needs-none', 'input[name*="special" i][value="none" i]']);
+}
+
+/** Click the step's "continue"/submit, trying the known ids first. */
+async function clickContinue(page) {
+  return clickIfPresent(page, [
+    '#driving-licence-submit',
+    '#theory-test-submit',
+    'button:has-text("Continue")',
+    'button[type=submit]',
+    '.govuk-button:not(.govuk-button--secondary)',
+  ]);
+}
+
 /** Accept the GOV.UK cookie banner if present, as a person would. */
 async function acceptCookies(page) {
   await clickIfPresent(page, [
@@ -144,27 +176,62 @@ async function acceptCookies(page) {
   ]);
 }
 
+/**
+ * The booking service is fronted by a Queue-it virtual waiting room. When busy,
+ * you are held on queue.driverpracticaltest… (or shown "please wait while we
+ * process your request") and the page polls itself until it is your turn. We do
+ * nothing but keep the single tab open and wait for its automatic redirect - no
+ * reloads, no parallel tabs, no token fiddling - up to a hard cap.
+ */
 async function waitThroughQueue(page) {
   const deadline = Date.now() + 10 * 60 * 1000;
   while (Date.now() < deadline) {
     const url = page.url();
     const body = (await page.textContent('body').catch(() => '')) || '';
-    if (!url.includes('queue.driverpracticaltest') && !/waiting room/i.test(body.slice(0, 2000))) {
-      return;
-    }
-    console.log('In the DVSA queue, waiting 30s...');
+    const queued =
+      url.includes('queue.driverpracticaltest') ||
+      url.includes('queue-it.net') ||
+      /waiting room|please wait while we process/i.test(body.slice(0, 2000));
+    if (!queued) return;
+    console.log('In the DVSA queue, waiting 30s for the automatic redirect...');
     await page.waitForTimeout(30_000);
   }
-  throw new Error('Still stuck in the DVSA queue after 10 minutes.');
+  throw new Error('Still stuck in the DVSA queue after 10 minutes; giving up this run.');
 }
 
 function assertNotBlocked(html) {
-  if (/_Incapsula_Resource|incapsula|imperva|request unsuccessful|access denied/i.test(html)) {
+  if (
+    /_Incapsula_Resource|incapsula|imperva|request unsuccessful|access denied|pardon our interruption/i.test(
+      html
+    )
+  ) {
     throw new Error(
       'DVSA served an anti-bot challenge page instead of the service. ' +
-        'This can happen from datacentre IPs; it will retry on the next scheduled run.'
+        'This is most likely the datacentre IP; see the README "Where to run it". ' +
+        'It will retry on the next scheduled run.'
     );
   }
+}
+
+/**
+ * If a CAPTCHA appears, a human is needed - alert and stop cleanly rather than
+ * hammering (auto-solving would be exactly the abusive behaviour to avoid).
+ * Returns true if it bailed.
+ */
+async function bailIfCaptcha(page) {
+  const captcha = page.locator(
+    '#recaptcha_widget_div, iframe[src*="recaptcha"], iframe[title*="captcha" i], .g-recaptcha'
+  );
+  if (!(await captcha.count().catch(() => 0))) return false;
+  await snapshot(page, 'captcha');
+  await sendAlert({
+    title: 'DVSA checker needs a hand',
+    message:
+      'The DVSA site showed a CAPTCHA, so the automated check stopped. ' +
+      'Open https://driverpracticaltest.dvsa.gov.uk/ yourself to continue.',
+  }).catch(() => {});
+  console.log('CAPTCHA encountered; alerted and stopping this run.');
+  return true;
 }
 
 async function launchBrowser() {
@@ -202,6 +269,7 @@ async function run() {
     await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
+    if (await bailIfCaptcha(page)) return;
     await snapshot(page, 'landing');
     await idleMouse(page); // settle before touching anything
     await acceptCookies(page);
@@ -234,56 +302,53 @@ async function run() {
     await dwell(page);
 
     // 3. Driving licence number -------------------------------------------
+    // Verified id from open-source DVSA checkers: #driving-licence-number
+    // (older: #driving-licence). Value is read back after typing.
     await typeInto(
       page,
-      ['#driving-licence-number', 'input[name="driving-licence-number" i]', '#dln'],
+      ['#driving-licence-number', '#driving-licence', 'input[name="driving-licence-number" i]', '#dln'],
       licence,
       'driving licence field',
       { verify: true }
     );
+    await handleCandidateOptions(page); // extended-test / special-needs, if on this page
     await sleep(page, 600, 1500);
-    await clickIfPresent(page, [
-      '#driving-licence-submit',
-      'button:has-text("Continue")',
-      'button[type=submit]',
-      '.govuk-button',
-    ]);
+    await clickContinue(page);
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
+    if (await bailIfCaptcha(page)) return;
     await snapshot(page, 'after-licence');
     await dwell(page);
 
     // 4. Theory test certificate number -----------------------------------
-    await typeInto(
-      page,
-      [
-        '#theory-test-number',
-        'input[name="theory-test-number" i]',
-        'input[name*="theory" i]',
-        '#theoryTestNumber',
-      ],
-      theory,
-      'theory test number field',
-      { verify: true }
-    );
-    await sleep(page, 600, 1500);
-    await clickIfPresent(page, [
-      'button:has-text("Continue")',
-      '#theory-test-submit',
-      'button[type=submit]',
-      '.govuk-button',
-    ]);
-    await waitThroughQueue(page);
+    // Exact id couldn't be confirmed from a public repo; the DVSA convention is
+    // label-matches-id, so #theory-test-number / #certificate-number are the
+    // likely candidates. Non-fatal: if the field isn't on this page (the flow
+    // may order things differently), we log and carry on rather than abort.
+    const typedTheory = await typeIfPresent(page, [
+      '#theory-test-number',
+      '#certificate-number',
+      'input[name*="theory" i]',
+      'input[name*="certificate" i]',
+      '#theoryTestNumber',
+    ], theory);
+    if (typedTheory) {
+      await handleCandidateOptions(page);
+      await sleep(page, 600, 1500);
+      await clickContinue(page);
+      await waitThroughQueue(page);
+    } else {
+      console.log('  Theory-number field not on this page; continuing (see snapshot).');
+    }
     await snapshot(page, 'after-theory');
     await dwell(page);
 
-    // 5. Instructor / personal reference: answer "no" and continue --------
+    // 5. Instructor reference: leave the PRN blank (private candidate), continue.
     await clickIfPresent(page, [
       '#instructor-referral-no',
-      'input[value="no" i]',
-      'label:has-text("No") >> input[type=radio]',
+      'input[name*="instructor" i][value="no" i]',
     ]);
-    await clickIfPresent(page, ['button:has-text("Continue")', 'button[type=submit]', '.govuk-button']);
+    await clickContinue(page);
     await waitThroughQueue(page);
     await snapshot(page, 'after-instructor');
     await dwell(page);
@@ -307,8 +372,9 @@ async function run() {
     await snapshot(page, 'centre-results');
     await dwell(page);
 
+    // Results container/rows from tp223 + ciuffetelli checkers.
     const centreLinks = page.locator(
-      '.test-centre-details-link, a.test-centre, .test-centre-results a, ol li a'
+      '.test-centre-details-link, .test-centre-details a, .test-centre-results a, a.test-centre, ol li a'
     );
     const count = await centreLinks.count().catch(() => 0);
     if (!count) {
@@ -330,28 +396,42 @@ async function run() {
     await humanClick(page, chosen);
     await waitThroughQueue(page);
     assertNotBlocked(await page.content());
+    if (await bailIfCaptcha(page)) return;
     await snapshot(page, 'calendar');
 
     // 7. Read the availability calendar -----------------------------------
+    // Grounded in tp223/DVSA-Driving-Test-Check: the calendar is
+    // .BookingCalendar-datesBody; a day is bookable when its class does NOT
+    // carry the "--unavailable"/"--unbookable" modifier; the ISO date lives in
+    // data-date on the day cell or its .BookingCalendar-dateLink.
+    const emptyState = await page
+      .locator('text=/no tests found/i')
+      .count()
+      .catch(() => 0);
     await page.waitForSelector('.BookingCalendar-datesBody, .BookingCalendar', { timeout: 60_000 });
-    const dates = await page.$$eval(
-      '.BookingCalendar-date--bookable a, td.BookingCalendar-date--bookable',
-      (els) =>
-        els
-          .map(
-            (el) =>
-              el.getAttribute('data-date') ||
-              el.querySelector('a')?.getAttribute('data-date') ||
-              null
-          )
-          .filter(Boolean)
+    const dates = await page.$$eval('.BookingCalendar-datesBody td, .BookingCalendar td', (cells) =>
+      cells
+        .filter((td) => {
+          const cls = td.className || '';
+          if (/--unavailable|--unbookable|--nonWorkingDay/.test(cls)) return false;
+          return !!(
+            td.getAttribute('data-date') || td.querySelector('[data-date]')
+          );
+        })
+        .map(
+          (td) =>
+            td.getAttribute('data-date') ||
+            td.querySelector('.BookingCalendar-dateLink, a, [data-date]')?.getAttribute('data-date') ||
+            null
+        )
+        .filter(Boolean)
     );
 
     const unique = [...new Set(dates)].sort();
     console.log(
       unique.length
         ? `  Bookable dates on the calendar: ${unique.join(', ')}`
-        : '  No bookable dates shown on the calendar.'
+        : `  No bookable dates shown${emptyState ? ' ("no tests found")' : ''}.`
     );
 
     const matches = unique.filter((d) => d >= earliest && d <= latest);

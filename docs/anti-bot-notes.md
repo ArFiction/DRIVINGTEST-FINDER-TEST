@@ -146,6 +146,72 @@ one slip is worse than A.
 
 ---
 
+## 4. Imperva/Incapsula + DVSA specifics
+
+**Why a plain `curl` gets a 403.** Imperva evaluates in layers: TLS+IP → cookie
+challenge → the `reese84` JavaScript challenge (which fingerprints canvas, WebGL
+`RENDERER` — `SwiftShader` on headless is a giveaway — AudioContext, fonts) →
+extended JS validation → behaviour. `curl` can't run the JS, so it never mints
+the tokens and is served the `_Incapsula_Resource` interstitial. A real browser
+runs the challenge, gets its cookies, and reloads the real page.
+
+**Cookies:** `visid_incap_*` (long-lived visitor id — the reason a persistent
+profile warm-starts you as a returning visitor), `incap_ses_*` (short-lived
+session; rotates; must stay consistent), `reese84`/`___utmvc` (the challenge
+token). Let Chrome own them all; never hand-inject or replay them through curl.
+The token isn't publicly documented as hard-bound to IP+TLS, but the model
+expects the **same IP and TLS for a session's lifetime** — which is exactly why a
+**VPN/datacenter proxy is the fastest way to turn a passing browser into a 403**,
+and a stable home IP + real Chrome is the low-risk profile.
+
+**The queue is Queue-it**, not Incapsula: DVSA sends you to
+`queue.driverpracticaltest…` / `assets.queue-it.net` with a 302, the room polls
+itself, and redirects you back with a signed token when it's your turn. Correct
+behaviour: keep the single tab open and wait for the automatic redirect; never
+reload, open parallel tabs, or fake the token. New slots drop **Mondays 06:00**
+(deepest queue — avoid unless you truly want that drop). Service hours 06:00–23:40.
+
+**Selectors (from open-source checkers; verify against the live DOM):**
+- Licence: `#driving-licence-number` (older `#driving-licence`); continue
+  `#driving-licence-submit`. Candidate options `#extended-test-no`,
+  `#special-needs-none`; instructor PRN `#instructor-prn` (leave blank).
+- Theory/certificate number field id **not confirmed** in any public repo — the
+  checkers log in via licence + application reference instead. Likely
+  `#theory-test-number` or `#certificate-number` by DVSA's naming convention;
+  the code treats it as optional and snapshots the page so it can be pinned.
+- Test centre: `#test-centres-input` + `#test-centres-submit`; results
+  `.test-centre-results` / `.test-centre-details`.
+- Calendar: `.BookingCalendar-datesBody`; a `td` is bookable when its class does
+  **not** contain `--unavailable`; ISO date in `data-date` on the cell /
+  `.BookingCalendar-dateLink`. Empty state: "No tests found on any date".
+- **Never** click the booking/confirm controls (`#confirm-changes`,
+  `#slot-warning-continue`, slot buttons) — the checker stops at the calendar.
+- reCAPTCHA (`#recaptcha_widget_div`) → alert the human and stop, never auto-solve.
+
+Source repos: `tp223/DVSA-Driving-Test-Check`, `2e0byo/YADC`,
+`ciuffetelli/driver-practical-test-dvsa`, `saul/dvsa-auto-booker`. A consistent
+theme across all of them: **DVSA's anti-bot changes eventually break every one**,
+so expect to maintain the selectors or stop.
+
+## 5. Ethics & DVSA terms — read this
+
+Be straight about it: **DVSA tightened its booking terms in 2026 to prohibit
+third-party apps, bots and automated services**, and the wording targets
+automated *access/interaction*, not just automated payment. So an alert-only,
+read-only checker is **still against the letter of the terms**, even though it
+never books. DVSA has already **suspended 1,178+ licence numbers** over "unusual
+booking activity", and their enforcement ladder runs from warnings up to
+suspending licence numbers and cancelling bookings (criminal referral is reserved
+for actual attacks/unauthorised access).
+
+What separates this from the abusive bots DVSA is fighting: own licence and data,
+read-only (never books/pays/changes/cancels), low volume (~3×/day), human
+cadence, and no queue/challenge circumvention. The **realistic worst case for an
+individual is your licence number being flagged and your booking cancelled or
+blocked** — a modest but real cost that lands on the very test you care about.
+This is defensible on *intent and impact*, not on *compliance*. Keep it personal,
+low-impact and read-only, and be prepared to stop if DVSA objects.
+
 ## Priority order (most impact first)
 
 1. **Run from a residential IP** (home box / self-hosted runner / N100 mini-PC).
@@ -179,3 +245,10 @@ fingerprinting), ProxyHat (Imperva detection layers, pass-rate table), Akamai
 BlackHat EU 2017 (HTTP/2 fingerprint), Browserless / AlterLab (bundled Chromium
 JA3), send.win / DataImpulse (residential vs datacenter), GitHub Community #26442
 (runner IPs = Azure), krowdev (JA4/HTTP2 2026).
+
+Imperva/DVSA: Scrapfly / ScrapeBadger / ZenRows (Incapsula reese84/incap_ses/
+visid mechanics), Queue-it developer docs (virtual queue 302 + signed token),
+open-source DVSA checkers (tp223/DVSA-Driving-Test-Check, 2e0byo/YADC,
+ciuffetelli/driver-practical-test-dvsa, saul/dvsa-auto-booker) for selectors,
+GOV.UK Despatch blog + What Car?/Carwow (2026 rule changes, bot ban, 1,178+
+licence suspensions).
