@@ -33,7 +33,6 @@ import {
   LAUNCH_ARGS,
   IGNORE_DEFAULT_ARGS,
   CONTEXT_OPTIONS,
-  UA_CHROME,
   applyStealth,
   humanClick,
   humanType,
@@ -99,10 +98,27 @@ async function firstPresent(page, candidates, what) {
   );
 }
 
-/** Human-type into the first present candidate selector. */
-async function typeInto(page, candidates, text, what) {
+/**
+ * Human-type into the first present candidate selector. When `verify` is set
+ * (licence / theory number), read the field back and retype once if it does not
+ * match - an exact-match field must not be left corrupted by a dropped keystroke
+ * or an autoformatting input.
+ */
+async function typeInto(page, candidates, text, what, { verify = false } = {}) {
   const el = await firstPresent(page, candidates, what);
   await humanType(page, el, text);
+  if (!verify) return;
+  const norm = (s) => (s || '').replace(/\s+/g, '').toUpperCase();
+  const got = await el.inputValue().catch(() => '');
+  if (norm(got) !== norm(text)) {
+    console.warn(`  Field "${what}" read back as "${got}"; clearing and retyping once.`);
+    await el.fill('');
+    await humanType(page, el, text);
+    const got2 = await el.inputValue().catch(() => '');
+    if (norm(got2) !== norm(text)) {
+      throw new Error(`Field "${what}" would not accept the value correctly (got "${got2}").`);
+    }
+  }
 }
 
 /** Human-click the first present candidate; returns false if none exist. */
@@ -160,14 +176,15 @@ async function launchBrowser() {
   };
   let context;
   try {
-    // Real Chrome: authentic TLS + Client Hints, unlike bundled Chromium.
-    // No userAgent override here so the UA stays consistent with the real build.
+    // Real Chrome: authentic TLS + HTTP/2 + Client Hints, unlike bundled
+    // Chromium. No userAgent override on either path - an honest UA that matches
+    // the real build beats a spoofed one that can contradict the TLS fingerprint.
     context = await chromium.launchPersistentContext(USER_DATA_DIR, { ...base, channel: 'chrome' });
   } catch (err) {
     console.warn(`Real Chrome unavailable (${err.message.split('\n')[0]}); using Chromium.`);
-    context = await chromium.launchPersistentContext(USER_DATA_DIR, { ...base, userAgent: UA_CHROME });
+    context = await chromium.launchPersistentContext(USER_DATA_DIR, base);
   }
-  await applyStealth(context, { spoofWebgl: process.env.DVSA_WEBGL_SPOOF !== 'off' });
+  await applyStealth(context, { spoofWebgl: process.env.DVSA_WEBGL_SPOOF === 'on' });
   return context;
 }
 
@@ -221,7 +238,8 @@ async function run() {
       page,
       ['#driving-licence-number', 'input[name="driving-licence-number" i]', '#dln'],
       licence,
-      'driving licence field'
+      'driving licence field',
+      { verify: true }
     );
     await sleep(page, 600, 1500);
     await clickIfPresent(page, [
@@ -245,7 +263,8 @@ async function run() {
         '#theoryTestNumber',
       ],
       theory,
-      'theory test number field'
+      'theory test number field',
+      { verify: true }
     );
     await sleep(page, 600, 1500);
     await clickIfPresent(page, [

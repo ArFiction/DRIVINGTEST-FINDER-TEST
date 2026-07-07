@@ -87,7 +87,9 @@ jobs:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-        run: xvfb-run --auto-servernum npm run check
+        # 1920x1080x24 virtual screen so window.screen looks like a real desktop
+        # (the xvfb default geometry is an odd size and a mild bot tell).
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" npm run check
 
       - name: Upload debug artifacts
         if: always() && steps.guard.outputs.run == 'true'
