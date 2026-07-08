@@ -16,7 +16,7 @@
  *   DVSA_THEORY_NUMBER    - your theory test pass certificate number
  *
  * Optional env vars:
- *   DVSA_TEST_CENTRE      - postcode or town to search (default "AL2 1UX")
+ *   DVSA_TEST_CENTRE      - postcode or town to search for a test centre
  *   DVSA_TEST_TYPE        - test category (default "car")
  *   DVSA_CENTRE_MATCH     - pick the centre whose name contains this text
  *   DVSA_EARLIEST_DATE    - ignore slots before this date (YYYY-MM-DD)
@@ -47,13 +47,14 @@ const USER_DATA_DIR = process.env.USER_DATA_DIR || '.chrome-profile';
 
 const licence = process.env.DVSA_LICENCE_NUMBER;
 const theory = process.env.DVSA_THEORY_NUMBER;
-const centreQuery = process.env.DVSA_TEST_CENTRE || 'AL2 1UX';
+const centreQuery = process.env.DVSA_TEST_CENTRE;
 const testType = (process.env.DVSA_TEST_TYPE || 'car').toLowerCase();
 const centreMatch = (process.env.DVSA_CENTRE_MATCH || '').toLowerCase();
 
 const missing = [];
 if (!licence) missing.push('DVSA_LICENCE_NUMBER');
 if (!theory) missing.push('DVSA_THEORY_NUMBER');
+if (!centreQuery) missing.push('DVSA_TEST_CENTRE');
 if (missing.length) {
   console.error(`Missing required env vars: ${missing.join(', ')}`);
   process.exit(2);
