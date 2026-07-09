@@ -53,11 +53,15 @@ const centreMatch = (process.env.DVSA_CENTRE_MATCH || '').toLowerCase();
 
 const missing = [];
 if (!licence) missing.push('DVSA_LICENCE_NUMBER');
-if (!theory) missing.push('DVSA_THEORY_NUMBER');
 if (!centreQuery) missing.push('DVSA_TEST_CENTRE');
 if (missing.length) {
   console.error(`Missing required env vars: ${missing.join(', ')}`);
   process.exit(2);
+}
+if (!theory) {
+  console.warn(
+    'DVSA_THEORY_NUMBER not set - running without it. The run will show whether DVSA requires it.'
+  );
 }
 
 const earliest = process.env.DVSA_EARLIEST_DATE || todayISO();
@@ -326,13 +330,15 @@ async function run() {
     // label-matches-id, so #theory-test-number / #certificate-number are the
     // likely candidates. Non-fatal: if the field isn't on this page (the flow
     // may order things differently), we log and carry on rather than abort.
-    const typedTheory = await typeIfPresent(page, [
-      '#theory-test-number',
-      '#certificate-number',
-      'input[name*="theory" i]',
-      'input[name*="certificate" i]',
-      '#theoryTestNumber',
-    ], theory);
+    const typedTheory = theory
+      ? await typeIfPresent(page, [
+          '#theory-test-number',
+          '#certificate-number',
+          'input[name*="theory" i]',
+          'input[name*="certificate" i]',
+          '#theoryTestNumber',
+        ], theory)
+      : false;
     if (typedTheory) {
       await handleCandidateOptions(page);
       await sleep(page, 600, 1500);
