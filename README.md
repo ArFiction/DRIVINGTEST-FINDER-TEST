@@ -73,6 +73,42 @@ Avoid paid residential proxies for a personal checker — your own home IP is
 cleaner and free. Start on GitHub Actions; if it gets challenged often, move to
 a home/self-hosted run. The code is identical either way.
 
+## Run on your own computer
+
+The lowest-friction, lowest-risk option — no GitHub, no billing, your home IP.
+
+**One-time setup**
+1. Install **Node 20+** (<https://nodejs.org>) and **Google Chrome**.
+2. Get this repo: green **Code** button → **Download ZIP** (or `git clone`), then
+   open a terminal in the folder.
+3. `npm install`
+4. `npx playwright install chrome`
+5. Copy `.env.example` to `.env` and fill it in — your licence number, theory
+   number, `DVSA_TEST_CENTRE`, and an `NTFY_TOPIC` for phone alerts.
+
+**Test it**
+```bash
+npm run local:now
+```
+Runs one check immediately and prints what it found. If a step fails, look in
+the `artifacts/` folder for a screenshot of each page. (Set `HEADLESS=false` in
+`.env` to watch the browser do it.)
+
+**Schedule it** — `npm run local` runs one check after a random 0–45 min wait
+(so it never fires on an exact clock tick). Point your OS scheduler at it:
+
+- **macOS / Linux** — `crontab -e`, then (fix the path to the repo):
+  ```
+  35 5  * * * cd /path/to/repo && /usr/bin/env node run-local.mjs >> dvsa.log 2>&1
+  20 11 * * * cd /path/to/repo && /usr/bin/env node run-local.mjs >> dvsa.log 2>&1
+  20 17 * * * cd /path/to/repo && /usr/bin/env node run-local.mjs >> dvsa.log 2>&1
+  ```
+- **Windows** — Task Scheduler → create a task with three daily triggers
+  (05:35, 11:20, 17:20); Action: Program `node`, Arguments `run-local.mjs`,
+  "Start in" = the repo folder.
+
+Your computer has to be **awake** at those times for a check to run.
+
 ## Looking like a real browser
 
 The checker removes the obvious automation tells and behaves like a person,
